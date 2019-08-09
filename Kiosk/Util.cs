@@ -31,19 +31,21 @@
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 // 
 
-using Microsoft.ProjectOxford.Face;
-using Microsoft.ProjectOxford.Face.Contract;
+using Microsoft.Azure.CognitiveServices.Vision.Face.Models;
 using Microsoft.Rest;
 using ServiceHelpers;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Runtime.InteropServices.WindowsRuntime;
+using System.Threading;
 using System.Threading.Tasks;
 using Windows.Devices.Enumeration;
 using Windows.Graphics.Display;
 using Windows.Graphics.Imaging;
+using Windows.Networking.BackgroundTransfer;
 using Windows.Storage;
 using Windows.Storage.Streams;
 using Windows.UI.Popups;
@@ -70,22 +72,16 @@ namespace IntelligentKioskSample
         {
             string errorDetails = ex.Message;
 
-            FaceAPIException faceApiException = ex as FaceAPIException;
-            if (faceApiException?.ErrorMessage != null)
+            APIErrorException faceApiException = ex as APIErrorException;
+            if (faceApiException?.Message != null)
             {
-                errorDetails = faceApiException.ErrorMessage;
+                errorDetails = faceApiException.Message;
             }
 
-            Microsoft.ProjectOxford.Common.ClientException commonException = ex as Microsoft.ProjectOxford.Common.ClientException;
-            if (commonException?.Error?.Message != null)
+            var visionException = ex as Microsoft.Azure.CognitiveServices.Vision.ComputerVision.Models.ComputerVisionErrorException;
+            if (visionException?.Body?.Message != null)
             {
-                errorDetails = commonException.Error.Message;
-            }
-
-            Microsoft.ProjectOxford.Vision.ClientException visionException = ex as Microsoft.ProjectOxford.Vision.ClientException;
-            if (visionException?.Error?.Message != null)
-            {
-                errorDetails = visionException.Error.Message;
+                errorDetails = visionException.Body.Message;
             }
 
             HttpOperationException httpException = ex as HttpOperationException;
@@ -97,7 +93,7 @@ namespace IntelligentKioskSample
             return errorDetails;
         }
 
-        internal static Face FindFaceClosestToRegion(IEnumerable<Face> faces, BitmapBounds region)
+        internal static DetectedFace FindFaceClosestToRegion(IEnumerable<DetectedFace> faces, BitmapBounds region)
         {
             return faces?.Where(f => Util.AreFacesPotentiallyTheSame(region, f.FaceRectangle))
                                   .OrderBy(f => Math.Abs(region.X - f.FaceRectangle.Left) + Math.Abs(region.Y - f.FaceRectangle.Top)).FirstOrDefault();
@@ -108,12 +104,21 @@ namespace IntelligentKioskSample
             return CoreUtil.AreFacesPotentiallyTheSame((int)face1.X, (int)face1.Y, (int)face1.Width, (int)face1.Height, face2.Left, face2.Top, face2.Width, face2.Height);
         }
 
-        public static async Task ConfirmActionAndExecute(string message, Func<Task> action)
+        public static async Task ConfirmActionAndExecute(string message, Func<Task> action,
+            Func<Task> cancelAction = null, string confirmActionLabel = "Yes", string cancelActionLabel = "Cancel")
         {
             var messageDialog = new MessageDialog(message);
 
-            messageDialog.Commands.Add(new UICommand("Yes", new UICommandInvokedHandler(async (c) => await action())));
-            messageDialog.Commands.Add(new UICommand("Cancel", new UICommandInvokedHandler((c) => { })));
+            messageDialog.Commands.Add(new UICommand(confirmActionLabel, new UICommandInvokedHandler(async (c) => await action())));
+
+            if (cancelAction != null)
+            {
+                messageDialog.Commands.Add(new UICommand(cancelActionLabel, new UICommandInvokedHandler(async (c) => { await cancelAction(); })));
+            }
+            else
+            {
+                messageDialog.Commands.Add(new UICommand(cancelActionLabel, new UICommandInvokedHandler((c) => { })));
+            }
 
             messageDialog.DefaultCommandIndex = 1;
             messageDialog.CancelCommandIndex = 1;
@@ -125,6 +130,56 @@ namespace IntelligentKioskSample
         {
             DeviceInformationCollection deviceInfo = await DeviceInformation.FindAllAsync(DeviceClass.VideoCapture);
             return deviceInfo.OrderBy(d => d.Name).Select(d => d.Name);
+        }
+
+        public static KeyValuePair<string, double>[] EmotionToRankedList(Emotion emotion)
+        {
+            return new KeyValuePair<string, double>[]
+            {
+                new KeyValuePair<string, double>("Anger", emotion.Anger),
+                new KeyValuePair<string, double>("Contempt", emotion.Contempt),
+                new KeyValuePair<string, double>("Disgust", emotion.Disgust),
+                new KeyValuePair<string, double>("Fear", emotion.Fear),
+                new KeyValuePair<string, double>("Happiness", emotion.Happiness),
+                new KeyValuePair<string, double>("Neutral", emotion.Neutral),
+                new KeyValuePair<string, double>("Sadness", emotion.Sadness),
+                new KeyValuePair<string, double>("Surprise", emotion.Surprise)
+            }
+            .OrderByDescending(e => e.Value)
+            .ToArray();
+        }
+
+        public static Microsoft.Azure.CognitiveServices.Vision.Face.Models.Gender? GetFaceGender(Microsoft.Azure.CognitiveServices.Vision.ComputerVision.Models.Gender? gender)
+        {
+            switch (gender)
+            {
+                case Microsoft.Azure.CognitiveServices.Vision.ComputerVision.Models.Gender.Male:
+                    return Gender.Male;
+                case Microsoft.Azure.CognitiveServices.Vision.ComputerVision.Models.Gender.Female:
+                    return Gender.Female;
+                default:
+                    return null;
+            }
+        }
+
+        public static bool ExtractFileFromZipArchive(StorageFile zipFile, string extractedFileName, StorageFile newFile)
+        {
+            try
+            {
+                using (ZipArchive archive = ZipFile.OpenRead(zipFile.Path))
+                {
+                    ZipArchiveEntry entry = archive.Entries.FirstOrDefault(e => e.FullName != null && e.FullName.Contains(extractedFileName, StringComparison.OrdinalIgnoreCase));
+                    if (entry != null)
+                    {
+                        entry.ExtractToFile(newFile.Path, true);
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+            return true;
         }
 
         async private static Task CropBitmapAsync(Stream localFileStream, FaceRectangle rectangle, StorageFile resultFile)
@@ -144,6 +199,15 @@ namespace IntelligentKioskSample
                                         DisplayInformation.GetForCurrentView().LogicalDpi, DisplayInformation.GetForCurrentView().LogicalDpi, pixels);
 
                 await encoder.FlushAsync();
+            }
+        }
+
+        async public static Task<ImageSource> DownloadAndCropBitmapAsync(string imageUrl, FaceRectangle rectangle)
+        {
+            byte[] imgBytes = await new System.Net.Http.HttpClient().GetByteArrayAsync(imageUrl);
+            using (Stream stream = new MemoryStream(imgBytes))
+            {
+                return await GetCroppedBitmapAsync(stream.AsRandomAccessStream(), rectangle);
             }
         }
 
@@ -205,26 +269,33 @@ namespace IntelligentKioskSample
             return pix.DetachPixelData();
         }
 
-		internal static async Task<byte[]> GetPixelBytesFromSoftwareBitmapAsync(SoftwareBitmap softwareBitmap)
-		{
-			using (InMemoryRandomAccessStream stream = new InMemoryRandomAccessStream())
-			{
-				BitmapEncoder encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.JpegEncoderId, stream);
-				encoder.SetSoftwareBitmap(softwareBitmap);
-				await encoder.FlushAsync();
+        internal static async Task DownloadFileASync(string link, StorageFile destination, IProgress<DownloadOperation> progress, CancellationToken cancellationToken)
+        {
+            BackgroundDownloader downloader = new BackgroundDownloader();
+            DownloadOperation download = downloader.CreateDownload(new Uri(link), destination);
+            await download.StartAsync().AsTask(cancellationToken, progress);
+        }
 
-				// Read the pixel bytes from the memory stream
-				using (var reader = new DataReader(stream.GetInputStreamAt(0)))
-				{
-					var bytes = new byte[stream.Size];
-					await reader.LoadAsync((uint)stream.Size);
-					reader.ReadBytes(bytes);
-					return bytes;
-				}
-			}
-		}
+        internal static async Task<byte[]> GetPixelBytesFromSoftwareBitmapAsync(SoftwareBitmap softwareBitmap)
+        {
+            using (InMemoryRandomAccessStream stream = new InMemoryRandomAccessStream())
+            {
+                BitmapEncoder encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.JpegEncoderId, stream);
+                encoder.SetSoftwareBitmap(softwareBitmap);
+                await encoder.FlushAsync();
 
-		public static void AddRange<T>(this IList<T> list, IEnumerable<T> items)
+                // Read the pixel bytes from the memory stream
+                using (var reader = new DataReader(stream.GetInputStreamAt(0)))
+                {
+                    var bytes = new byte[stream.Size];
+                    await reader.LoadAsync((uint)stream.Size);
+                    reader.ReadBytes(bytes);
+                    return bytes;
+                }
+            }
+        }
+
+        public static void AddRange<T>(this IList<T> list, IEnumerable<T> items)
         {
             foreach (var item in items)
             {
@@ -251,7 +322,7 @@ namespace IntelligentKioskSample
         private static async Task<Tuple<double, double>> ResizePhoto(Stream photo, int height, IRandomAccessStream resultStream)
         {
             WriteableBitmap wb = new WriteableBitmap(1, 1);
-            wb = await wb.FromStream(photo.AsRandomAccessStream());
+            wb = await BitmapFactory.FromStream(photo.AsRandomAccessStream());
 
             int originalWidth = wb.PixelWidth;
             int originalHeight = wb.PixelHeight;

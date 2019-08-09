@@ -31,8 +31,7 @@
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 // 
 
-using Microsoft.ProjectOxford.Common.Contract;
-using Microsoft.ProjectOxford.Face.Contract;
+using Microsoft.Azure.CognitiveServices.Vision.Face.Models;
 using ServiceHelpers;
 using System;
 using System.Collections.Generic;
@@ -64,13 +63,23 @@ namespace IntelligentKioskSample.Controls
 
     public interface IRealTimeDataProvider
     {
-        Face GetLastFaceAttributesForFace(BitmapBounds faceBox);
+        Microsoft.Azure.CognitiveServices.Vision.Face.Models.DetectedFace GetLastFaceAttributesForFace(BitmapBounds faceBox);
         IdentifiedPerson GetLastIdentifiedPersonForFace(BitmapBounds faceBox);
-        SimilarPersistedFace GetLastSimilarPersistedFaceForFace(BitmapBounds faceBox);
+        SimilarFace GetLastSimilarPersistedFaceForFace(BitmapBounds faceBox);
+    }
+
+    public interface ICameraFrameProcessor
+    {
+        Task ProcessFrame(VideoFrame frame, Canvas visualizationCanvas);
     }
 
     public sealed partial class CameraControl : UserControl
     {
+        public bool PerformFaceTracking { get; set; } = true;
+        public bool ShowFaceTracking { get; set; } = true;
+
+        public ICameraFrameProcessor CameraFrameProcessor { get; set; }
+
         public event EventHandler<ImageAnalyzer> ImageCaptured;
         public event EventHandler<AutoCaptureState> AutoCaptureStateChanged;
         public event EventHandler CameraRestarted;
@@ -106,7 +115,21 @@ namespace IntelligentKioskSample.Controls
             set
             {
                 this.enableAutoCaptureMode = value;
-                this.commandBar.Visibility = this.enableAutoCaptureMode ? Visibility.Collapsed : Visibility.Visible;
+                this.EnableCameraControls = !enableAutoCaptureMode;
+            }
+        }
+
+        private bool enableCameraControls = true;
+        public bool EnableCameraControls
+        {
+            get
+            {
+                return enableCameraControls;
+            }
+            set
+            {
+                this.enableCameraControls = value;
+                this.commandBar.Visibility = this.enableCameraControls ? Visibility.Visible : Visibility.Collapsed;
             }
         }
 
@@ -124,20 +147,38 @@ namespace IntelligentKioskSample.Controls
         private ThreadPoolTimer frameProcessingTimer;
         private SemaphoreSlim frameProcessingSemaphore = new SemaphoreSlim(1);
         private AutoCaptureState autoCaptureState;
-        private IEnumerable<DetectedFace> detectedFacesFromPreviousFrame;
+        private IEnumerable<Windows.Media.FaceAnalysis.DetectedFace> detectedFacesFromPreviousFrame;
         private DateTime timeSinceWaitingForStill;
         private DateTime lastTimeWhenAFaceWasDetected;
+        private bool isStreamingOnRealtimeResolution = false;
+        private DeviceInformation lastUsedCamera;
 
         private IRealTimeDataProvider realTimeDataProvider;
 
         public CameraControl()
         {
             this.InitializeComponent();
+
+            Window.Current.Activated += CurrentWindowActivationStateChanged;
+        }
+
+        private async void CurrentWindowActivationStateChanged(object sender, Windows.UI.Core.WindowActivatedEventArgs e)
+        {
+            if ((e.WindowActivationState == Windows.UI.Core.CoreWindowActivationState.CodeActivated ||
+                e.WindowActivationState == Windows.UI.Core.CoreWindowActivationState.PointerActivated) &&
+                captureManager?.CameraStreamState == CameraStreamState.Shutdown &&
+                webCamCaptureElement.Visibility == Visibility.Visible)
+            {
+                // When an app is running full screen and it loses focus due to user interaction, Windows will shut the camera down.
+                // We detect here when the window regains focus and trigger a restart of the camera, but only if detect the camera was supposed to 
+                // be visible and its state is actually Shutdown.
+                await StartStreamAsync(isForRealTimeProcessing: isStreamingOnRealtimeResolution, desiredCamera: lastUsedCamera);
+            }
         }
 
         #region Camera stream processing
 
-        public async Task StartStreamAsync(bool isForRealTimeProcessing = false)
+        public async Task StartStreamAsync(bool isForRealTimeProcessing = false, DeviceInformation desiredCamera = null)
         {
             try
             {
@@ -145,6 +186,9 @@ namespace IntelligentKioskSample.Controls
                     captureManager.CameraStreamState == CameraStreamState.Shutdown ||
                     captureManager.CameraStreamState == CameraStreamState.NotStreaming)
                 {
+                    loadingOverlay.Visibility = Visibility.Visible;
+                    this.commandBar.Visibility = Visibility.Collapsed;
+
                     if (captureManager != null)
                     {
                         captureManager.Dispose();
@@ -155,38 +199,56 @@ namespace IntelligentKioskSample.Controls
                     MediaCaptureInitializationSettings settings = new MediaCaptureInitializationSettings();
                     var allCameras = await DeviceInformation.FindAllAsync(DeviceClass.VideoCapture);
                     var selectedCamera = allCameras.FirstOrDefault(c => c.Name == SettingsHelper.Instance.CameraName);
+                    if (desiredCamera != null)
+                    {
+                        selectedCamera = desiredCamera;
+                    }
+                    else if (lastUsedCamera != null)
+                    {
+                        selectedCamera = lastUsedCamera;
+                    }
+
                     if (selectedCamera != null)
                     {
                         settings.VideoDeviceId = selectedCamera.Id;
+                        lastUsedCamera = selectedCamera;
                     }
 
+                    cameraSwitchButton.Visibility = allCameras.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
+
                     await captureManager.InitializeAsync(settings);
+
                     await SetVideoEncodingToHighestResolution(isForRealTimeProcessing);
+                    isStreamingOnRealtimeResolution = isForRealTimeProcessing;
 
                     this.webCamCaptureElement.Source = captureManager;
                 }
 
                 if (captureManager.CameraStreamState == CameraStreamState.NotStreaming)
                 {
-                    if (this.faceTracker == null)
+                    if (PerformFaceTracking || CameraFrameProcessor != null)
                     {
-                        this.faceTracker = await FaceTracker.CreateAsync();
+                        if (this.faceTracker == null)
+                        {
+                            this.faceTracker = await FaceTracker.CreateAsync();
+                        }
+
+                        if (this.frameProcessingTimer != null)
+                        {
+                            this.frameProcessingTimer.Cancel();
+                            frameProcessingSemaphore.Release();
+                        }
+                        TimeSpan timerInterval = TimeSpan.FromMilliseconds(66); //15fps
+                        this.frameProcessingTimer = ThreadPoolTimer.CreatePeriodicTimer(new TimerElapsedHandler(ProcessCurrentVideoFrame), timerInterval);
                     }
 
                     this.videoProperties = this.captureManager.VideoDeviceController.GetMediaStreamProperties(MediaStreamType.VideoPreview) as VideoEncodingProperties;
-
                     await captureManager.StartPreviewAsync();
 
-                    if (this.frameProcessingTimer != null)
-                    {
-                        this.frameProcessingTimer.Cancel();
-                        frameProcessingSemaphore.Release();
-                    }
-                    TimeSpan timerInterval = TimeSpan.FromMilliseconds(66); //15fps
-                    this.frameProcessingTimer = ThreadPoolTimer.CreatePeriodicTimer(new TimerElapsedHandler(ProcessCurrentVideoFrame), timerInterval);
-
-                    this.cameraControlSymbol.Symbol = Symbol.Camera;
                     this.webCamCaptureElement.Visibility = Visibility.Visible;
+
+                    loadingOverlay.Visibility = Visibility.Collapsed;
+                    commandBar.Visibility = enableCameraControls ? Visibility.Visible : Visibility.Collapsed;
                 }
             }
             catch (Exception ex)
@@ -227,10 +289,7 @@ namespace IntelligentKioskSample.Controls
 
                 await this.captureManager.VideoDeviceController.SetMediaStreamPropertiesAsync(MediaStreamType.VideoPreview, highestVideoEncodingSetting);
 
-                if (this.CameraAspectRatioChanged != null)
-                {
-                    this.CameraAspectRatioChanged(this, EventArgs.Empty);
-                }
+                this.CameraAspectRatioChanged?.Invoke(this, EventArgs.Empty);
             }
         }
 
@@ -244,7 +303,7 @@ namespace IntelligentKioskSample.Controls
 
             try
             {
-                IEnumerable<DetectedFace> faces = null;
+                IEnumerable<Windows.Media.FaceAnalysis.DetectedFace> faces = null;
 
                 // Create a VideoFrame object specifying the pixel format we want our capture image to be (NV12 bitmap in this case).
                 // GetPreviewFrame will convert the native webcam frame into this format.
@@ -271,12 +330,20 @@ namespace IntelligentKioskSample.Controls
                             this.UpdateAutoCaptureState(faces);
                         }
 
-                        // Create our visualization using the frame dimensions and face results but run it on the UI thread.
-                        var previewFrameSize = new Windows.Foundation.Size(previewFrame.SoftwareBitmap.PixelWidth, previewFrame.SoftwareBitmap.PixelHeight);
-                        var ignored = this.Dispatcher.RunAsync(Windows.UI.Core.CoreDispatcherPriority.Normal, () =>
+                        if (this.ShowFaceTracking)
                         {
-                            this.ShowFaceTrackingVisualization(previewFrameSize, faces);
-                        });
+                            // Create our visualization using the frame dimensions and face results but run it on the UI thread.
+                            var previewFrameSize = new Windows.Foundation.Size(previewFrame.SoftwareBitmap.PixelWidth, previewFrame.SoftwareBitmap.PixelHeight);
+                            var ignored = this.Dispatcher.RunAsync(Windows.UI.Core.CoreDispatcherPriority.Normal, () =>
+                            {
+                                this.ShowFaceTrackingVisualization(previewFrameSize, faces);
+                            });
+                        }
+
+                        if (CameraFrameProcessor != null)
+                        {
+                            await CameraFrameProcessor.ProcessFrame(previewFrame, this.FaceTrackingVisualizationCanvas);
+                        }
                     }
                 }
             }
@@ -289,7 +356,7 @@ namespace IntelligentKioskSample.Controls
             }
         }
 
-        private void ShowFaceTrackingVisualization(Windows.Foundation.Size framePixelSize, IEnumerable<DetectedFace> detectedFaces)
+        private void ShowFaceTrackingVisualization(Windows.Foundation.Size framePixelSize, IEnumerable<Windows.Media.FaceAnalysis.DetectedFace> detectedFaces)
         {
             this.FaceTrackingVisualizationCanvas.Children.Clear();
 
@@ -302,7 +369,7 @@ namespace IntelligentKioskSample.Controls
                 double widthScale = framePixelSize.Width / actualWidth;
                 double heightScale = framePixelSize.Height / actualHeight;
 
-                foreach (DetectedFace face in detectedFaces)
+                foreach (Windows.Media.FaceAnalysis.DetectedFace face in detectedFaces)
                 {
                     RealTimeFaceIdentificationBorder faceBorder = new RealTimeFaceIdentificationBorder();
                     this.FaceTrackingVisualizationCanvas.Children.Add(faceBorder);
@@ -311,14 +378,14 @@ namespace IntelligentKioskSample.Controls
 
                     if (this.realTimeDataProvider != null)
                     {
-                        Face detectedFace = this.realTimeDataProvider.GetLastFaceAttributesForFace(face.FaceBox);
+                        Microsoft.Azure.CognitiveServices.Vision.Face.Models.DetectedFace detectedFace = this.realTimeDataProvider.GetLastFaceAttributesForFace(face.FaceBox);
                         IdentifiedPerson identifiedPerson = this.realTimeDataProvider.GetLastIdentifiedPersonForFace(face.FaceBox);
-                        SimilarPersistedFace similarPersistedFace = this.realTimeDataProvider.GetLastSimilarPersistedFaceForFace(face.FaceBox);
+                        SimilarFace similarPersistedFace = this.realTimeDataProvider.GetLastSimilarPersistedFaceForFace(face.FaceBox);
 
                         string uniqueId = null;
                         if (similarPersistedFace != null)
                         {
-                            uniqueId = similarPersistedFace.PersistedFaceId.ToString("N").Substring(0, 4);
+                            uniqueId = similarPersistedFace.PersistedFaceId.GetValueOrDefault().ToString("N").Substring(0, 4);
                         }
 
                         if (detectedFace != null && detectedFace.FaceAttributes != null)
@@ -326,12 +393,14 @@ namespace IntelligentKioskSample.Controls
                             if (identifiedPerson != null && identifiedPerson.Person != null)
                             {
                                 // age, gender and id available
-                                faceBorder.ShowIdentificationData(detectedFace.FaceAttributes.Age, detectedFace.FaceAttributes.Gender, (uint)Math.Round(identifiedPerson.Confidence * 100), identifiedPerson.Person.Name, uniqueId: uniqueId);
+                                faceBorder.ShowIdentificationData(detectedFace.FaceAttributes.Age.GetValueOrDefault(), 
+                                    detectedFace.FaceAttributes.Gender?.ToString(), (uint)Math.Round(identifiedPerson.Confidence * 100), identifiedPerson.Person.Name, uniqueId: uniqueId);
                             }
                             else
                             {
                                 // only age and gender available
-                                faceBorder.ShowIdentificationData(detectedFace.FaceAttributes.Age, detectedFace.FaceAttributes.Gender, 0, null, uniqueId: uniqueId);
+                                faceBorder.ShowIdentificationData(detectedFace.FaceAttributes.Age.GetValueOrDefault(), 
+                                    detectedFace.FaceAttributes.Gender?.ToString(), 0, null, uniqueId: uniqueId);
                             }
 
                             faceBorder.ShowRealTimeEmotionData(detectedFace.FaceAttributes.Emotion);
@@ -360,7 +429,7 @@ namespace IntelligentKioskSample.Controls
             }
         }
 
-        private async void UpdateAutoCaptureState(IEnumerable<DetectedFace> detectedFaces)
+        private async void UpdateAutoCaptureState(IEnumerable<Windows.Media.FaceAnalysis.DetectedFace> detectedFaces)
         {
             const int IntervalBeforeCheckingForStill = 500;
             const int IntervalWithoutFacesBeforeRevertingToWaitingForFaces = 3;
@@ -444,7 +513,8 @@ namespace IntelligentKioskSample.Controls
             this.OnAutoCaptureStateChanged(this.autoCaptureState);
         }
 
-        private bool AreFacesStill(IEnumerable<DetectedFace> detectedFacesFromPreviousFrame, IEnumerable<DetectedFace> detectedFacesFromCurrentFrame)
+        private bool AreFacesStill(IEnumerable<Windows.Media.FaceAnalysis.DetectedFace> detectedFacesFromPreviousFrame, 
+            IEnumerable<Windows.Media.FaceAnalysis.DetectedFace> detectedFacesFromCurrentFrame)
         {
             int horizontalMovementThreshold = (int)(videoProperties.Width * 0.02);
             int verticalMovementThreshold = (int)(videoProperties.Height * 0.02);
@@ -452,7 +522,7 @@ namespace IntelligentKioskSample.Controls
             int numStillFaces = 0;
             int totalFacesInPreviousFrame = detectedFacesFromPreviousFrame.Count();
 
-            foreach (DetectedFace faceInPreviousFrame in detectedFacesFromPreviousFrame)
+            foreach (Windows.Media.FaceAnalysis.DetectedFace faceInPreviousFrame in detectedFacesFromPreviousFrame)
             {
                 if (numStillFaces > 0 && numStillFaces >= totalFacesInPreviousFrame / 2)
                 {
@@ -489,10 +559,13 @@ namespace IntelligentKioskSample.Controls
 
                 if (captureManager != null && captureManager.CameraStreamState != Windows.Media.Devices.CameraStreamState.Shutdown)
                 {
-                    this.FaceTrackingVisualizationCanvas.Children.Clear();
                     await this.captureManager.StopPreviewAsync();
 
-                    this.FaceTrackingVisualizationCanvas.Children.Clear();
+                    if (PerformFaceTracking)
+                    {
+                        this.FaceTrackingVisualizationCanvas.Children.Clear();
+                    }
+                    
                     this.webCamCaptureElement.Visibility = Visibility.Collapsed;
                 }
             }
@@ -544,25 +617,19 @@ namespace IntelligentKioskSample.Controls
 
         private void OnImageCaptured(ImageAnalyzer imageWithFace)
         {
-            if (this.ImageCaptured != null)
-            {
-                this.ImageCaptured(this, imageWithFace);
-            }
+            this.ImageCaptured?.Invoke(this, imageWithFace);
         }
 
         private void OnAutoCaptureStateChanged(AutoCaptureState state)
         {
-            if (this.AutoCaptureStateChanged != null)
-            {
-                this.AutoCaptureStateChanged(this, state);
-            }
+            this.AutoCaptureStateChanged?.Invoke(this, state);
         }
 
         #endregion
 
         public void HideCameraControls()
         {
-            this.commandBar.Visibility = Visibility.Collapsed;
+            this.EnableCameraControls = false;
         }
 
         public void SetRealTimeDataProvider(IRealTimeDataProvider provider)
@@ -572,23 +639,46 @@ namespace IntelligentKioskSample.Controls
 
         private async void CameraControlButtonClick(object sender, RoutedEventArgs e)
         {
-            if (this.cameraControlSymbol.Symbol == Symbol.Camera)
+            if (this.captureManager.CameraStreamState == CameraStreamState.Streaming)
             {
                 var img = await CaptureFrameAsync();
                 if (img != null)
                 {
-                    this.cameraControlSymbol.Symbol = Symbol.Refresh;
                     this.OnImageCaptured(img);
                 }
             }
             else
             {
-                this.cameraControlSymbol.Symbol = Symbol.Camera;
-
-                await StartStreamAsync();
+                await StartStreamAsync(isStreamingOnRealtimeResolution, lastUsedCamera);
 
                 this.CameraRestarted?.Invoke(this, EventArgs.Empty);
             }
+        }
+
+        private async void CameraSwitchtButtonClick(object sender, RoutedEventArgs e)
+        {
+            // if we are not streaming just ignore the request
+            if (captureManager.CameraStreamState != CameraStreamState.Streaming)
+            {
+                return;
+            }
+
+            // capture current device id
+            string currentCameraId = captureManager.MediaCaptureSettings.VideoDeviceId;
+
+            // stop camera
+            await StopStreamAsync();
+
+            // start streaming with the camera whose index is the next one in the line
+            var allCameras = await DeviceInformation.FindAllAsync(DeviceClass.VideoCapture);
+            int currentCameraIndex = allCameras.ToList().FindIndex(d => string.Compare(d.Id, currentCameraId, ignoreCase: true) == 0);
+            await StartStreamAsync(isStreamingOnRealtimeResolution, allCameras.ElementAt((currentCameraIndex + 1) % allCameras.Count));
+        }
+
+        private async void ControlUnloaded(object sender, RoutedEventArgs e)
+        {
+            await StopStreamAsync();
+            Window.Current.Activated -= CurrentWindowActivationStateChanged;
         }
     }
 }

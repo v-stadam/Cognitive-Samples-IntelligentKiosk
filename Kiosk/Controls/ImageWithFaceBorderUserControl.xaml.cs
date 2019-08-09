@@ -31,18 +31,19 @@
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 // 
 
-using Microsoft.ProjectOxford.Face.Contract;
+using Microsoft.Azure.CognitiveServices.Vision.ComputerVision.Models;
+using Microsoft.Azure.CognitiveServices.Vision.Face.Models;
+using ServiceHelpers;
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices.WindowsRuntime;
 using System.Threading.Tasks;
+using Windows.UI;
 using Windows.UI.Xaml;
 using Windows.UI.Xaml.Controls;
 using Windows.UI.Xaml.Media;
-using System.Collections.Generic;
-using System.IO;
-using ServiceHelpers;
-using Newtonsoft.Json.Linq;
 
 // The User Control item template is documented at http://go.microsoft.com/fwlink/?LinkId=234236
 
@@ -144,6 +145,14 @@ namespace IntelligentKioskSample.Controls
             new PropertyMetadata(false)
             );
 
+        public static readonly DependencyProperty ShowFaceLandmarksProperty =
+            DependencyProperty.Register(
+            "ShowFaceLandmarks",
+            typeof(bool),
+            typeof(ImageWithFaceBorderUserControl),
+            new PropertyMetadata(false)
+            );
+
         public static readonly DependencyProperty PerformComputerVisionAnalysisProperty =
             DependencyProperty.Register(
             "PerformComputerVisionAnalysis",
@@ -155,6 +164,14 @@ namespace IntelligentKioskSample.Controls
         public static readonly DependencyProperty PerformOCRAnalysisProperty =
             DependencyProperty.Register(
             "PerformOCRAnalysis",
+            typeof(bool),
+            typeof(ImageWithFaceBorderUserControl),
+            new PropertyMetadata(false)
+            );
+
+        public static readonly DependencyProperty PerformObjectDetectionProperty =
+            DependencyProperty.Register(
+            "PerformObjectDetection",
             typeof(bool),
             typeof(ImageWithFaceBorderUserControl),
             new PropertyMetadata(false)
@@ -220,6 +237,12 @@ namespace IntelligentKioskSample.Controls
             set { SetValue(DetectFaceLandmarksProperty, (bool)value); }
         }
 
+        public bool ShowFaceLandmarks
+        {
+            get { return (bool)GetValue(ShowFaceLandmarksProperty); }
+            set { SetValue(ShowFaceLandmarksProperty, value); }
+        }
+
         public bool PerformComputerVisionAnalysis
         {
             get { return (bool)GetValue(PerformComputerVisionAnalysisProperty); }
@@ -231,6 +254,14 @@ namespace IntelligentKioskSample.Controls
             get { return (bool)GetValue(PerformOCRAnalysisProperty); }
             set { SetValue(PerformOCRAnalysisProperty, (bool)value); }
         }
+
+        public bool PerformObjectDetection
+        {
+            get { return (bool)GetValue(PerformObjectDetectionProperty); }
+            set { SetValue(PerformObjectDetectionProperty, (bool)value); }
+        }
+
+        public TextRecognitionMode TextRecognitionMode { get; set; }
 
         private async void OnDataContextChanged(FrameworkElement sender, DataContextChangedEventArgs args)
         {
@@ -290,8 +321,7 @@ namespace IntelligentKioskSample.Controls
                 this.hostGrid.Children.Remove(child);
             }
 
-            ImageAnalyzer imageWithFace = this.DataContext as ImageAnalyzer;
-            if (imageWithFace != null)
+            if (this.DataContext is ImageAnalyzer imageWithFace)
             {
                 if (imageWithFace.DetectedFaces == null)
                 {
@@ -301,7 +331,7 @@ namespace IntelligentKioskSample.Controls
                 double renderedImageXTransform = this.imageControl.RenderSize.Width / this.bitmapImage.PixelWidth;
                 double renderedImageYTransform = this.imageControl.RenderSize.Height / this.bitmapImage.PixelHeight;
 
-                foreach (Face face in imageWithFace.DetectedFaces)
+                foreach (DetectedFace face in imageWithFace.DetectedFaces)
                 {
                     FaceIdentificationBorder faceUI = new FaceIdentificationBorder()
                     {
@@ -315,7 +345,7 @@ namespace IntelligentKioskSample.Controls
                     faceUI.BalloonForeground = this.BalloonForeground;
                     faceUI.ShowFaceRectangle(face.FaceRectangle.Width * renderedImageXTransform, face.FaceRectangle.Height * renderedImageYTransform);
 
-                    if (this.DetectFaceLandmarks)
+                    if (this.ShowFaceLandmarks)
                     {
                         faceUI.ShowFaceLandmarks(renderedImageXTransform, renderedImageYTransform, face);
                     }
@@ -337,7 +367,7 @@ namespace IntelligentKioskSample.Controls
 
                     if (this.ShowRecognitionResults)
                     {
-                        foreach (Face face in imageWithFace.DetectedFaces)
+                        foreach (DetectedFace face in imageWithFace.DetectedFaces)
                         {
                             // Get the border for the associated face id
                             FaceIdentificationBorder faceUI = (FaceIdentificationBorder)this.hostGrid.Children.FirstOrDefault(e => e is FaceIdentificationBorder && (Guid)(e as FaceIdentificationBorder).Tag == face.FaceId);
@@ -347,8 +377,8 @@ namespace IntelligentKioskSample.Controls
                                 IdentifiedPerson faceIdIdentification = imageWithFace.IdentifiedPersons.FirstOrDefault(p => p.FaceId == face.FaceId);
 
                                 string name = this.DetectFaceAttributes && faceIdIdentification != null ? faceIdIdentification.Person.Name : null;
-                                string gender = this.DetectFaceAttributes ? face.FaceAttributes.Gender : null;
-                                double age = this.DetectFaceAttributes ? face.FaceAttributes.Age : 0;
+                                Microsoft.Azure.CognitiveServices.Vision.Face.Models.Gender? gender = this.DetectFaceAttributes ? face.FaceAttributes.Gender : null;
+                                double age = this.DetectFaceAttributes ? face.FaceAttributes.Age.GetValueOrDefault() : 0;
                                 double confidence = this.DetectFaceAttributes && faceIdIdentification != null ? faceIdIdentification.Confidence : 0;
 
                                 faceUI.ShowIdentificationData(age, gender, (uint)Math.Round(confidence * 100), name);
@@ -371,40 +401,47 @@ namespace IntelligentKioskSample.Controls
                 this.hostGrid.Children.Remove(child);
             }
 
-            ImageAnalyzer img = this.DataContext as ImageAnalyzer;
-            if (img != null)
+            if (this.DataContext is ImageAnalyzer img)
             {
-                if (this.PerformOCRAnalysis && img.OcrResults == null)
+                List<Task> tasks = new List<Task>();
+                if (img.AnalysisResult == null)
                 {
-                    await Task.WhenAll(img.AnalyzeImageAsync(detectCelebrities: true), img.RecognizeTextAsync());
+                    tasks.Add(img.AnalyzeImageAsync(new List<Details> { Details.Celebrities, Details.Landmarks }));
                 }
-                else if (img.AnalysisResult == null)
+
+                if (this.PerformOCRAnalysis && (img.TextOperationResult == null || img.TextRecognitionMode != this.TextRecognitionMode))
                 {
-                    await img.AnalyzeImageAsync(detectCelebrities: true);
+                    tasks.Add(img.RecognizeTextAsync(this.TextRecognitionMode));
                 }
+
+                if (this.PerformObjectDetection && img.DetectedObjects == null)
+                {
+                    tasks.Add(img.DetectObjectsAsync());
+                }
+
+                await Task.WhenAll(tasks);
 
                 double renderedImageXTransform = this.imageControl.RenderSize.Width / this.bitmapImage.PixelWidth;
                 double renderedImageYTransform = this.imageControl.RenderSize.Height / this.bitmapImage.PixelHeight;
 
                 if (img.AnalysisResult.Faces != null)
                 {
-                    foreach (Microsoft.ProjectOxford.Vision.Contract.Face face in img.AnalysisResult.Faces)
+                    foreach (FaceDescription face in img.AnalysisResult.Faces)
                     {
-                        FaceIdentificationBorder faceUI = new FaceIdentificationBorder();
-
-                        faceUI.Margin = new Thickness((face.FaceRectangle.Left * renderedImageXTransform) + ((this.ActualWidth - this.imageControl.RenderSize.Width) / 2),
-                                                      (face.FaceRectangle.Top * renderedImageYTransform) + ((this.ActualHeight - this.imageControl.RenderSize.Height) / 2), 0, 0);
-
-                        faceUI.BalloonBackground = this.BalloonBackground;
-                        faceUI.BalloonForeground = this.BalloonForeground;
+                        FaceIdentificationBorder faceUI = new FaceIdentificationBorder
+                        {
+                            Margin = new Thickness((face.FaceRectangle.Left * renderedImageXTransform) + ((this.ActualWidth - this.imageControl.RenderSize.Width) / 2),
+                                                      (face.FaceRectangle.Top * renderedImageYTransform) + ((this.ActualHeight - this.imageControl.RenderSize.Height) / 2), 0, 0),
+                            BalloonBackground = this.BalloonBackground,
+                            BalloonForeground = this.BalloonForeground
+                        };
                         faceUI.ShowFaceRectangle(face.FaceRectangle.Width * renderedImageXTransform, face.FaceRectangle.Height * renderedImageYTransform);
 
-                        faceUI.ShowIdentificationData(face.Age, face.Gender, 0, null);
+                        var faceGender = Util.GetFaceGender(face.Gender);
+                        faceUI.ShowIdentificationData(face.Age, faceGender, 0, null);
                         this.hostGrid.Children.Add(faceUI);
 
-                        double celebRecoConfidence = 0;
-                        string celebRecoName;
-                        this.GetCelebrityInfoIfAvailable(img, face.FaceRectangle, out celebRecoName, out celebRecoConfidence);
+                        this.GetCelebrityInfoIfAvailable(img, face.FaceRectangle, out string celebRecoName, out double celebRecoConfidence);
                         if (!string.IsNullOrEmpty(celebRecoName))
                         {
                             Border celebUI = new Border
@@ -430,54 +467,138 @@ namespace IntelligentKioskSample.Controls
                     }
                 }
 
-                if (this.PerformOCRAnalysis && img.OcrResults.Regions != null)
+                // Clean up any old results
+                foreach (var child in this.hostGrid.Children.Where(c => (c is OCRBorder)).ToArray())
                 {
-                    if (img.OcrResults.TextAngle.HasValue)
-                    {
-                        this.imageControl.RenderTransform = new RotateTransform { Angle = -img.OcrResults.TextAngle.Value, CenterX = this.imageControl.RenderSize.Width / 2, CenterY = this.imageControl.RenderSize.Height / 2 };
-                    }
+                    this.hostGrid.Children.Remove(child);
+                }
 
-                    foreach (Microsoft.ProjectOxford.Vision.Contract.Region ocrRegion in img.OcrResults.Regions)
+                // OCR request (Printed / Handwritten)
+                if (this.PerformOCRAnalysis && img.TextOperationResult?.RecognitionResult?.Lines != null)
+                {
+                    this.imageControl.RenderTransform = new RotateTransform { Angle = 0, CenterX = this.imageControl.RenderSize.Width / 2, CenterY = this.imageControl.RenderSize.Height / 2 };
+
+                    foreach (Line line in img.TextOperationResult.RecognitionResult.Lines)
                     {
-                        foreach (var line in ocrRegion.Lines)
+                        foreach (var word in line.Words)
                         {
-                            foreach (var word in line.Words)
+                            double[] boundingBox = word?.BoundingBox?.ToArray() ?? new double[] { };
+                            if (boundingBox.Length == 8)
                             {
-                                OCRBorder ocrUI = new OCRBorder();
+                                double minLeft = renderedImageXTransform * (new List<double>() { boundingBox[0], boundingBox[2], boundingBox[4], boundingBox[6] }).Min();
+                                double minTop = renderedImageYTransform * (new List<double>() { boundingBox[1], boundingBox[3], boundingBox[5], boundingBox[7] }).Min();
+                                var points = new PointCollection()
+                                {
+                                    new Windows.Foundation.Point(boundingBox[0] * renderedImageXTransform - minLeft, boundingBox[1] * renderedImageYTransform - minTop),
+                                    new Windows.Foundation.Point(boundingBox[2] * renderedImageXTransform - minLeft, boundingBox[3] * renderedImageYTransform - minTop),
+                                    new Windows.Foundation.Point(boundingBox[4] * renderedImageXTransform - minLeft, boundingBox[5] * renderedImageYTransform - minTop),
+                                    new Windows.Foundation.Point(boundingBox[6] * renderedImageXTransform - minLeft, boundingBox[7] * renderedImageYTransform - minTop)
+                                };
 
-                                ocrUI.Margin = new Thickness((word.Rectangle.Left * renderedImageXTransform) + ((this.ActualWidth - this.imageControl.RenderSize.Width) / 2),
-                                                      (word.Rectangle.Top * renderedImageYTransform) + ((this.ActualHeight - this.imageControl.RenderSize.Height) / 2), 0, 0);
+                                // The four points (x-coordinate, y-coordinate) of the detected rectangle from the left-top corner and clockwise
+                                IEnumerable<Windows.Foundation.Point> leftPoints = points.OrderBy(p => p.X).Take(2);
+                                IEnumerable<Windows.Foundation.Point> rightPoints = points.OrderByDescending(p => p.X).Take(2);
+                                Windows.Foundation.Point leftTop = leftPoints.OrderBy(p => p.Y).FirstOrDefault();
+                                Windows.Foundation.Point leftBottom = leftPoints.OrderByDescending(p => p.Y).FirstOrDefault();
+                                Windows.Foundation.Point rightTop = rightPoints.OrderBy(p => p.Y).FirstOrDefault();
+                                Windows.Foundation.Point rightBottom = rightPoints.OrderByDescending(p => p.Y).FirstOrDefault();
+                                var orderedPoints = new PointCollection()
+                                {
+                                    leftTop, rightTop, rightBottom, leftBottom
+                                };
 
-                                ocrUI.SetData(word.Rectangle.Width * renderedImageXTransform, word.Rectangle.Height * renderedImageYTransform, word.Text);
+                                // simple math to get angle of the text
+                                double diffWidth = Math.Abs(leftTop.X - rightTop.X);
+                                double diffHeight = Math.Abs(leftTop.Y - rightTop.Y);
+                                double sign = leftTop.Y > rightTop.Y ? -1 : 1;
+                                double angle = sign * Math.Atan2(diffHeight, diffWidth) * (180 / Math.PI); // angle in degrees
 
+                                OCRBorder ocrUI = new OCRBorder
+                                {
+                                    Margin = new Thickness(minLeft + ((this.ActualWidth - this.imageControl.RenderSize.Width) / 2),
+                                      minTop + ((this.ActualHeight - this.imageControl.RenderSize.Height) / 2), 0, 0)
+                                };
+                                ocrUI.SetPoints(orderedPoints, word.Text, angle);
                                 this.hostGrid.Children.Add(ocrUI);
                             }
                         }
                     }
+                }
+
+                if (this.PerformObjectDetection && img.DetectedObjects != null)
+                {
+                    this.ShowObjectDetectionRegions(img.DetectedObjects);
                 }
             }
 
             this.progressIndicator.IsActive = false;
         }
 
-        private void GetCelebrityInfoIfAvailable(ImageAnalyzer analyzer, Microsoft.ProjectOxford.Vision.Contract.FaceRectangle rectangle, out string name, out double confidence)
+        private void ShowObjectDetectionRegions(IEnumerable<DetectedObject> predictions)
+        {
+            double renderedImageXTransform = this.imageControl.RenderSize.Width / this.bitmapImage.PixelWidth;
+            double renderedImageYTransform = this.imageControl.RenderSize.Height / this.bitmapImage.PixelHeight;
+
+            foreach (DetectedObject prediction in predictions)
+            {
+                this.hostGrid.Children.Add(
+                    new Border
+                    {
+                        BorderBrush = new SolidColorBrush(Colors.Lime),
+                        HorizontalAlignment = HorizontalAlignment.Left,
+                        VerticalAlignment = VerticalAlignment.Top,
+                        BorderThickness = new Thickness(2),
+                        Margin = new Thickness(prediction.Rectangle.X * renderedImageXTransform + ((this.ActualWidth - this.imageControl.RenderSize.Width) / 2),
+                                                prediction.Rectangle.Y * renderedImageYTransform + ((this.ActualHeight - this.imageControl.RenderSize.Height) / 2), 0, 0),
+                        Width = prediction.Rectangle.W * renderedImageXTransform,
+                        Height = prediction.Rectangle.H * renderedImageYTransform,
+                    });
+
+                this.hostGrid.Children.Add(
+                    new Border
+                    {
+                        Height = 40,
+                        FlowDirection = FlowDirection.LeftToRight,
+                        HorizontalAlignment = HorizontalAlignment.Left,
+                        VerticalAlignment = VerticalAlignment.Top,
+                        Margin = new Thickness(prediction.Rectangle.X * renderedImageXTransform + ((this.ActualWidth - this.imageControl.RenderSize.Width) / 2),
+                                                prediction.Rectangle.Y * renderedImageYTransform + ((this.ActualHeight - this.imageControl.RenderSize.Height) / 2) - 40, 0, 0),
+
+                        Child = new Border
+                        {
+                            Background = new SolidColorBrush(Colors.Lime),
+                            HorizontalAlignment = HorizontalAlignment.Left,
+                            VerticalAlignment = VerticalAlignment.Bottom,
+                            Child =
+                                new TextBlock
+                                {
+                                    Foreground = new SolidColorBrush(Colors.Black),
+                                    Text = $"{prediction.ObjectProperty} ({Math.Round(prediction.Confidence * 100)}%)",
+                                    FontSize = 16,
+                                    Margin = new Thickness(6, 0, 6, 0)
+                                }
+                        }
+                    });
+            }
+        }
+
+        private void GetCelebrityInfoIfAvailable(ImageAnalyzer analyzer, Microsoft.Azure.CognitiveServices.Vision.ComputerVision.Models.FaceRectangle rectangle, out string name, out double confidence)
         {
             if (analyzer.AnalysisResult?.Categories != null)
             {
                 foreach (var category in analyzer.AnalysisResult.Categories.Where(c => c.Detail != null))
                 {
-                    dynamic detail = JObject.Parse(category.Detail.ToString());
-                    if (detail.celebrities != null)
+                    if (category.Detail.Celebrities != null)
                     {
-                        foreach (var celebrity in detail.celebrities)
+                        foreach (var celebrity in category.Detail.Celebrities)
                         {
-                            int left = Int32.Parse(celebrity.faceRectangle.left.ToString());
-                            int top = Int32.Parse(celebrity.faceRectangle.top.ToString());
+                            int left = celebrity.FaceRectangle.Left;
+                            int top = celebrity.FaceRectangle.Top;
 
                             if (Math.Abs(left - rectangle.Left) <= 20 && Math.Abs(top - rectangle.Top) <= 20)
                             {
-                                name = celebrity.name.ToString();
-                                confidence = celebrity.confidence;
+                                name = celebrity.Name;
+                                confidence = celebrity.Confidence;
                                 return;
                             }
                         }
@@ -498,8 +619,7 @@ namespace IntelligentKioskSample.Controls
                 this.hostGrid.Children.Remove(child);
             }
 
-            ImageAnalyzer imageWithFace = this.DataContext as ImageAnalyzer;
-            if (imageWithFace != null)
+            if (this.DataContext is ImageAnalyzer imageWithFace)
             {
                 if (imageWithFace.DetectedFaces == null)
                 {
@@ -509,15 +629,15 @@ namespace IntelligentKioskSample.Controls
                 double renderedImageXTransform = this.imageControl.RenderSize.Width / this.bitmapImage.PixelWidth;
                 double renderedImageYTransform = this.imageControl.RenderSize.Height / this.bitmapImage.PixelHeight;
 
-                foreach (Face face in imageWithFace.DetectedFaces)
+                foreach (DetectedFace face in imageWithFace.DetectedFaces)
                 {
-                    FaceIdentificationBorder faceUI = new FaceIdentificationBorder();
-
-                    faceUI.Margin = new Thickness((face.FaceRectangle.Left * renderedImageXTransform) + ((this.ActualWidth - this.imageControl.RenderSize.Width) / 2),
-                                                    (face.FaceRectangle.Top * renderedImageYTransform) + ((this.ActualHeight - this.imageControl.RenderSize.Height) / 2), 0, 0);
-
-                    faceUI.BalloonBackground = this.BalloonBackground;
-                    faceUI.BalloonForeground = this.BalloonForeground;
+                    FaceIdentificationBorder faceUI = new FaceIdentificationBorder
+                    {
+                        Margin = new Thickness((face.FaceRectangle.Left * renderedImageXTransform) + ((this.ActualWidth - this.imageControl.RenderSize.Width) / 2),
+                                                    (face.FaceRectangle.Top * renderedImageYTransform) + ((this.ActualHeight - this.imageControl.RenderSize.Height) / 2), 0, 0),
+                        BalloonBackground = this.BalloonBackground,
+                        BalloonForeground = this.BalloonForeground
+                    };
 
                     faceUI.ShowFaceRectangle(face.FaceRectangle.Width * renderedImageXTransform, face.FaceRectangle.Height * renderedImageYTransform);
 
@@ -542,8 +662,7 @@ namespace IntelligentKioskSample.Controls
                 return;
             }
 
-            ImageAnalyzer img = this.DataContext as ImageAnalyzer;
-            if (img != null)
+            if (this.DataContext is ImageAnalyzer img)
             {
                 img.UpdateDecodedImageSize(this.bitmapImage.PixelHeight, this.bitmapImage.PixelWidth);
             }

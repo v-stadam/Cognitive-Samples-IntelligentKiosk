@@ -31,8 +31,8 @@
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 // 
 
-using Microsoft.ProjectOxford.Vision;
-using Microsoft.ProjectOxford.Vision.Contract;
+using Microsoft.Azure.CognitiveServices.Vision.ComputerVision;
+using Microsoft.Azure.CognitiveServices.Vision.ComputerVision.Models;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -42,10 +42,13 @@ namespace ServiceHelpers
 {
     public static class VisionServiceHelper
     {
-        public static int RetryCountOnQuotaLimitError = 6;
-        public static int RetryDelayOnQuotaLimitError = 500;
+        private const int NumberOfCharsInOperationId = 36;
+        private const int MaxRetriesOnTextRecognition = 10;
+        private const int DelayOnTextRecognition = 1000;
+        private const int RetryCountOnQuotaLimitError = 6;
+        private const int RetryDelayOnQuotaLimitError = 500;
 
-        private static VisionServiceClient visionClient { get; set; }
+        private static ComputerVisionClient client { get; set; }
 
         static VisionServiceHelper()
         {
@@ -73,14 +76,14 @@ namespace ServiceHelpers
             }
         }
 
-        private static string apiKeyRegion;
-        public static string ApiKeyRegion
+        private static string apiEndpoint;
+        public static string ApiEndpoint
         {
-            get { return apiKeyRegion; }
+            get { return apiEndpoint; }
             set
             {
-                var changed = apiKeyRegion != value;
-                apiKeyRegion = value;
+                var changed = apiEndpoint != value;
+                apiEndpoint = value;
                 if (changed)
                 {
                     InitializeVisionService();
@@ -90,15 +93,19 @@ namespace ServiceHelpers
 
         private static void InitializeVisionService()
         {
-            visionClient = ApiKeyRegion != null ?
-                new VisionServiceClient(ApiKey, string.Format("https://{0}.api.cognitive.microsoft.com/vision/v1.0", ApiKeyRegion)) :
-                new VisionServiceClient(ApiKey);
+            bool hasEndpoint = !string.IsNullOrEmpty(ApiEndpoint) ? Uri.IsWellFormedUriString(ApiEndpoint, UriKind.Absolute) : false;
+            client = !hasEndpoint
+                ? new ComputerVisionClient(new ApiKeyServiceClientCredentials(ApiKey))
+                : new ComputerVisionClient(new ApiKeyServiceClientCredentials(ApiKey))
+                {
+                    Endpoint = ApiEndpoint
+                };
         }
 
         private static async Task<TResponse> RunTaskWithAutoRetryOnQuotaLimitExceededError<TResponse>(Func<Task<TResponse>> action)
         {
-            int retriesLeft = FaceServiceHelper.RetryCountOnQuotaLimitError;
-            int delay = FaceServiceHelper.RetryDelayOnQuotaLimitError;
+            int retriesLeft = RetryCountOnQuotaLimitError;
+            int delay = RetryDelayOnQuotaLimitError;
 
             TResponse response = default(TResponse);
 
@@ -109,8 +116,9 @@ namespace ServiceHelpers
                     response = await action();
                     break;
                 }
-                catch (Microsoft.ProjectOxford.Vision.ClientException exception) when (exception.HttpStatus == (System.Net.HttpStatusCode)429 && retriesLeft > 0)
+                catch (ComputerVisionErrorException exception) when (exception.Response?.StatusCode == (System.Net.HttpStatusCode)429 && retriesLeft > 0)
                 {
+                    ErrorTrackingHelper.TrackException(exception, "Vision API throttling error");
                     if (retriesLeft == 1 && Throttled != null)
                     {
                         Throttled();
@@ -128,37 +136,67 @@ namespace ServiceHelpers
 
         private static async Task RunTaskWithAutoRetryOnQuotaLimitExceededError(Func<Task> action)
         {
-            await RunTaskWithAutoRetryOnQuotaLimitExceededError<object>(async () => { await action(); return null; } );
+            await RunTaskWithAutoRetryOnQuotaLimitExceededError<object>(async () => { await action(); return null; });
         }
 
-        public static async Task<AnalysisResult> DescribeAsync(Func<Task<Stream>> imageStreamCallback)
+        public static async Task<ImageDescription> DescribeAsync(Func<Task<Stream>> imageStreamCallback)
         {
-            return await RunTaskWithAutoRetryOnQuotaLimitExceededError<AnalysisResult>(async () => await visionClient.DescribeAsync(await imageStreamCallback()));
+            return await RunTaskWithAutoRetryOnQuotaLimitExceededError(async () => await client.DescribeImageInStreamAsync(await imageStreamCallback()));
         }
 
-        public static async Task<AnalysisResult> AnalyzeImageAsync(string imageUrl, IEnumerable<VisualFeature> visualFeatures = null, IEnumerable<string> details = null)
+        public static async Task<ImageAnalysis> AnalyzeImageAsync(string imageUrl, IList<VisualFeatureTypes> visualFeatures = null, IList<Details> details = null)
         {
-            return await RunTaskWithAutoRetryOnQuotaLimitExceededError<AnalysisResult>(() => visionClient.AnalyzeImageAsync(imageUrl, visualFeatures, details));
+            return await RunTaskWithAutoRetryOnQuotaLimitExceededError(() => client.AnalyzeImageAsync(imageUrl, visualFeatures, details));
         }
 
-        public static async Task<AnalysisResult> AnalyzeImageAsync(Func<Task<Stream>> imageStreamCallback, IEnumerable<VisualFeature> visualFeatures = null, IEnumerable<string> details = null)
+        public static async Task<ImageAnalysis> AnalyzeImageAsync(Func<Task<Stream>> imageStreamCallback, IList<VisualFeatureTypes> visualFeatures = null, IList<Details> details = null)
         {
-            return await RunTaskWithAutoRetryOnQuotaLimitExceededError<AnalysisResult>(async () => await visionClient.AnalyzeImageAsync(await imageStreamCallback(), visualFeatures, details ));
+            return await RunTaskWithAutoRetryOnQuotaLimitExceededError(async () => await client.AnalyzeImageInStreamAsync(await imageStreamCallback(), visualFeatures, details));
         }
 
-        public static async Task<AnalysisResult> DescribeAsync(string imageUrl)
+        public static async Task<ImageDescription> DescribeAsync(string imageUrl)
         {
-            return await RunTaskWithAutoRetryOnQuotaLimitExceededError<AnalysisResult>(() => visionClient.DescribeAsync(imageUrl));
+            return await RunTaskWithAutoRetryOnQuotaLimitExceededError(() => client.DescribeImageAsync(imageUrl));
         }
 
-        public static async Task<OcrResults> RecognizeTextAsync(string imageUrl)
+        public static async Task<TextOperationResult> RecognizeTextAsync(string imageUrl, TextRecognitionMode textRecognitionMode, bool detectOrientation = true)
         {
-            return await RunTaskWithAutoRetryOnQuotaLimitExceededError<OcrResults>(() => visionClient.RecognizeTextAsync(imageUrl));
+            RecognizeTextHeaders textHeaders = await client.RecognizeTextAsync(imageUrl, textRecognitionMode);
+            return await GetTextRecognitionResultAsync(client, textHeaders.OperationLocation);
         }
 
-        public static async Task<OcrResults> RecognizeTextAsync(Func<Task<Stream>> imageStreamCallback)
+        public static async Task<TextOperationResult> RecognizeTextAsync(Func<Task<Stream>> imageStreamCallback, TextRecognitionMode textRecognitionMode, bool detectOrientation = true)
         {
-            return await RunTaskWithAutoRetryOnQuotaLimitExceededError<OcrResults>(async () => await visionClient.RecognizeTextAsync(await imageStreamCallback()));
+            RecognizeTextInStreamHeaders textHeaders = await client.RecognizeTextInStreamAsync(await imageStreamCallback(), textRecognitionMode);
+            return await GetTextRecognitionResultAsync(client, textHeaders.OperationLocation);
+        }
+
+        public static async Task<DetectResult> DetectObjectsInStreamAsync(Func<Task<Stream>> imageStreamCallback)
+        {
+            return await RunTaskWithAutoRetryOnQuotaLimitExceededError(async () => await client.DetectObjectsInStreamAsync(await imageStreamCallback()));
+        }
+
+        public static async Task<DetectResult> DetectObjectsAsync(string imageUrl)
+        {
+            return await RunTaskWithAutoRetryOnQuotaLimitExceededError(() => client.DetectObjectsAsync(imageUrl));
+        }
+
+        private static async Task<TextOperationResult> GetTextRecognitionResultAsync(ComputerVisionClient computerVision, string operationLocation)
+        {
+            // Retrieve the URI where the recognized text will be stored from the Operation-Location header
+            string operationId = operationLocation.Substring(operationLocation.Length - NumberOfCharsInOperationId);
+            TextOperationResult result = await computerVision.GetTextOperationResultAsync(operationId);
+
+            // Wait for the operation to complete
+            int i = 0;
+            while ((result.Status == TextOperationStatusCodes.Running || result.Status == TextOperationStatusCodes.NotStarted) &&
+                i++ < MaxRetriesOnTextRecognition)
+            {
+                await Task.Delay(DelayOnTextRecognition);
+                result = await computerVision.GetTextOperationResultAsync(operationId);
+            }
+
+            return result;
         }
     }
 }

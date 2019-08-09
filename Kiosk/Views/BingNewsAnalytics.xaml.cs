@@ -35,7 +35,6 @@ using ServiceHelpers;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
-using System.ComponentModel;
 using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
@@ -109,7 +108,7 @@ namespace IntelligentKioskSample.Views
 
                 var news = await BingSearchHelper.GetNewsSearchResults(query, count: 50, offset:0, market: GetBingSearchMarketFromLanguage(userLanguage));
 
-                Task<SentimentResult> sentimentTask = TextAnalyticsHelper.GetTextSentimentAsync(news.Select(n => n.Title).ToArray(), language: GetTextAnalyticsLanguageCodeFromLanguage(userLanguage));
+                Task<SentimentResult> sentimentTask = TextAnalyticsHelper.GetSentimentAsync(news.Select(n => n.Title).ToArray(), language: GetTextAnalyticsLanguageCodeFromLanguage(userLanguage));
 
                 Task<KeyPhrasesResult> keyPhrasesTask;
                 if (IsLanguageSupportedByKeyPhraseAPI(userLanguage))
@@ -138,7 +137,7 @@ namespace IntelligentKioskSample.Views
                 var wordGroups = keyPhrasesTask.Result.KeyPhrases.SelectMany(k => k).GroupBy(phrase => phrase, StringComparer.OrdinalIgnoreCase).OrderByDescending(g => g.Count()).Take(10).OrderBy(g => g.Key);
                 this.TopKeyPhrases.AddRange(wordGroups.Select(g => new KeyPhraseCount { KeyPhrase = g.Key, Count = g.Count() }));
             }
-            catch (HttpRequestException ex)
+            catch (Exception ex)
             {
                 await Util.GenericApiCallExceptionHandler(ex, "Processing error");
             }
@@ -156,6 +155,7 @@ namespace IntelligentKioskSample.Views
                 case "Spanish": return "es-MX";
                 case "French": return "fr-FR";
                 case "Portuguese": return "pt-BR";
+                case "Japanese": return "ja-JP";
                 default:
                     return "en-US";
             }
@@ -169,6 +169,7 @@ namespace IntelligentKioskSample.Views
                 case "Spanish": return "es";
                 case "French": return "fr";
                 case "Portuguese": return "pt";
+                case "Japanese": return "ja";
                 default:
                     return "en";
             }

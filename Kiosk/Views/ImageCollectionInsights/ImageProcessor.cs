@@ -31,7 +31,7 @@
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 // 
 
-using Microsoft.ProjectOxford.Vision;
+using Microsoft.Azure.CognitiveServices.Vision.ComputerVision.Models;
 using ServiceHelpers;
 using System;
 using System.Collections.Generic;
@@ -43,7 +43,11 @@ namespace IntelligentKioskSample.Views.ImageCollectionInsights
 {
     public class ImageProcessor
     {
-        private static VisualFeature[] DefaultVisualFeatureTypes = new VisualFeature[] { VisualFeature.Tags, VisualFeature.Description };
+        private static readonly List<VisualFeatureTypes> DefaultVisualFeatureTypes = new List<VisualFeatureTypes>
+        {
+            VisualFeatureTypes.Tags,
+            VisualFeatureTypes.Description
+        };
 
         public static async Task<ImageInsights> ProcessImageAsync(Func<Task<Stream>> imageStream, string imageId)
         {
@@ -51,7 +55,7 @@ namespace IntelligentKioskSample.Views.ImageCollectionInsights
             analyzer.ShowDialogOnFaceApiErrors = true;
 
             // trigger vision, face and emotion requests
-            await Task.WhenAll(analyzer.AnalyzeImageAsync(detectCelebrities: false, visualFeatures: DefaultVisualFeatureTypes), analyzer.DetectFacesAsync(detectFaceAttributes: true));
+            await Task.WhenAll(analyzer.AnalyzeImageAsync(null, visualFeatures: DefaultVisualFeatureTypes), analyzer.DetectFacesAsync(detectFaceAttributes: true));
 
             // trigger face match against previously seen faces
             await analyzer.FindSimilarPersistedFacesAsync();
@@ -61,7 +65,7 @@ namespace IntelligentKioskSample.Views.ImageCollectionInsights
             // assign computer vision results
             result.VisionInsights = new VisionInsights
             {
-                Caption = analyzer.AnalysisResult.Description?.Captions[0].Text,
+                Caption = analyzer.AnalysisResult.Description?.Captions.FirstOrDefault()?.Text,
                 Tags = analyzer.AnalysisResult.Tags != null ? analyzer.AnalysisResult.Tags.Select(t => t.Name).ToArray() : new string[0]
             };
 
@@ -72,15 +76,15 @@ namespace IntelligentKioskSample.Views.ImageCollectionInsights
                 FaceInsights faceInsights = new FaceInsights
                 {
                     FaceRectangle = face.FaceRectangle,
-                    Age = face.FaceAttributes.Age,
-                    Gender = face.FaceAttributes.Gender,
-                    TopEmotion = face.FaceAttributes.Emotion.ToRankedList().First().Key
+                    Age = face.FaceAttributes.Age.GetValueOrDefault(),
+                    Gender = face.FaceAttributes.Gender?.ToString() ?? string.Empty,
+                    TopEmotion = Util.EmotionToRankedList(face.FaceAttributes.Emotion).First().Key
                 };
 
                 SimilarFaceMatch similarFaceMatch = analyzer.SimilarFaceMatches.FirstOrDefault(s => s.Face.FaceId == face.FaceId);
                 if (similarFaceMatch != null)
                 {
-                    faceInsights.UniqueFaceId = similarFaceMatch.SimilarPersistedFace.PersistedFaceId;
+                    faceInsights.UniqueFaceId = similarFaceMatch.SimilarPersistedFace.PersistedFaceId.GetValueOrDefault();
                 }
 
                 faceInsightsList.Add(faceInsights);

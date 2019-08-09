@@ -1,31 +1,16 @@
 # Custom Vision Explorer
 
-This example shows how to use the Custom Vision APIs to create image classifiers and how to score images against a target classifier. 
+This example shows how to use the Custom Vision APIs and how to score images against a custom image classifier or object detector. 
 
 Once you have it configured and at least one project created, just select a target project and send an image for scoring. You can do 
 so from local files, Bing Image Search results or from a web camera capture. Once you submit a photo, the results are shown on above 
 the photo as a list of tags and their associated confidence level. 
 
+Image Classification model:
 ![alt text](https://github.com/Microsoft/Cognitive-Samples-IntelligentKiosk/blob/master/Documentation/CustomVisionExplorer.JPG "Custom Vision Explorer")
 
-# Custom Vision Setup
-
-This is where you can create and manage your own classifiers. In case you have used the Face Identification Setup in the kiosk this 
-will look very familiar to you. It integrates with Bing Images very nicely, which literally makes the task of creating a classifier a 
-matter of seconds. 
-
-You can get to the Custom Vision Setup page by clicking on the ‘+’ button near the Project selector in the Custom Vision Explorer page. 
-The Setup page will prompt you for API keys. In case you don’t have keys for the service you can find the key acquisition steps by 
-clicking on the Settings button on the top-right of the Setup page.
-
-![alt text](https://github.com/Microsoft/Cognitive-Samples-IntelligentKiosk/blob/master/Documentation/CustomVisionSetup.JPG "Custom Vision Setup")
-
-# Camera integration during the Custom Vision Setup workflow
-
-When you are creating your image classifiers the web cam capture can come in very handy. You can just enable auto-capture in the UI 
-and spend a few seconds moving the object in front of the camera while it captures photos from several angles.
-
-![alt text](https://github.com/Microsoft/Cognitive-Samples-IntelligentKiosk/blob/master/Documentation/CustomVisionCameraCapture.JPG "Custom Vision Camera Capture")
+Object Detection model:
+![alt text](https://github.com/Microsoft/Cognitive-Samples-IntelligentKiosk/blob/master/Documentation/CustomVisionExplorer_ObjectDetection.png "Custom Vision Explorer")
 
 # Active Learning
 

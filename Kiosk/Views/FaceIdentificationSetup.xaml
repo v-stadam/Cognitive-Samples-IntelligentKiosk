@@ -19,7 +19,7 @@
             <RowDefinition Height="auto"/>
         </Grid.RowDefinitions>
 
-        <CommandBar x:Name="commandBar" VerticalAlignment="Top" HorizontalContentAlignment="Stretch">
+        <CommandBar x:Name="commandBar" DefaultLabelPosition="Right">
            
             <AppBarButton Icon="Play" Label="Train Group" Click="OnStartTrainingClicked" />
 
@@ -52,11 +52,7 @@
             </CommandBar.SecondaryCommands>
 
             <CommandBar.Content>
-                <ctl:PageHeader>
-                    <ctl:PageHeader.HeaderContent>
-                        <TextBlock Text="FACE IDENTIFICATION SETUP" Style="{ThemeResource PageTitleTextBlockStyle}" TextWrapping="NoWrap"/>
-                    </ctl:PageHeader.HeaderContent>
-                </ctl:PageHeader>
+                <TextBlock Text="Face Identification Setup" Style="{ThemeResource PageTitleTextBlockStyle}" Margin="14,10,12,0"/>
             </CommandBar.Content>
         </CommandBar>
 
@@ -167,7 +163,7 @@
                         <SymbolIcon Symbol="Add" Visibility="{Binding ElementName=personGroupPeopleListView, Path=SelectedValue, Converter={StaticResource nullToVisibilityConverter}}"/>
                         <Button.Flyout>
                             <Flyout x:Name="trainingImageCollectorFlyout" Opened="OnImageSearchFlyoutOpened">
-                                <ctl:ImageSearchUserControl x:Name="bingSearchControl" OnImageSearchCompleted="OnImageSearchCompleted" OnImageSearchCanceled="OnImageSearchCanceled" EnableCameraCapture="True" />
+                                <ctl:ImageSearchUserControl x:Name="bingSearchControl" ImageSelectionMode="Multiple" OnImageSearchCompleted="OnImageSearchCompleted" OnImageSearchCanceled="OnImageSearchCanceled" EnableCameraCapture="True" />
                             </Flyout>
                         </Button.Flyout>
                     </Button>
